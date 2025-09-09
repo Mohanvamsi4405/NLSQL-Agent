@@ -3,45 +3,47 @@ from flask_cors import CORS
 import duckdb
 import os
 import json
-from tempfile import NamedTemporaryFile
 import re
+from io import StringIO
+import pandas as pd
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 
-# Load environment variables from the .env file
-load_dotenv()
-
-# Retrieve the API key from the environment
+# Retrieve the API key from the environment, assuming it's set in production.
+# If not found, fall back to loading from a .env file for local development.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found. Please set it in your .env file.")
+    try:
+        load_dotenv()
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+        if not GROQ_API_KEY:
+            raise ValueError("GROQ_API_KEY not found. Please set it in your environment or a .env file.")
+    except Exception as e:
+        # Fallback for environments where dotenv might not be available
+        raise ValueError(f"GROQ_API_KEY not found and dotenv failed to load it: {e}")
 
 app = Flask(__name__)
 CORS(app)
 
 # A global dictionary to store the database connection for the session.
-# This will persist across different requests.
+# This will persist across different requests within the same process.
 db_session = {}
 
-def get_db_info(file_path, table_name):
-    """Creates and returns a DuckDB connection and the table name."""
+def get_db_connection(uploaded_file):
+    """Creates and returns an in-memory DuckDB connection with the data."""
     try:
-        # Determine the correct reading function based on file extension
-        file_ext = os.path.splitext(file_path)[1].lower()
+        # Read the uploaded file's content into a Pandas DataFrame
+        string_io = StringIO(uploaded_file.read().decode('utf-8'))
+        df = pd.read_csv(string_io)
+
+        # Create an in-memory DuckDB connection
+        con = duckdb.connect(':memory:')
         
-        # Use a temporary, file-based DuckDB database
-        db_file_path = file_path.replace(file_ext, '.duckdb')
-        con = duckdb.connect(database=db_file_path, read_only=False)
+        # Register the DataFrame as a table in the in-memory database
+        con.register('data_table', df)
         
-        if file_ext == '.csv':
-            read_function = f"read_csv_auto('{file_path}')"
-        
-        else:
-            raise Exception(f"Unsupported file format: {file_ext}")
-            
-        con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM {read_function}")
-        return con, table_name, db_file_path
+        return con
     except Exception as e:
         raise Exception(f"Failed to create database from file: {str(e)}")
 
@@ -72,34 +74,26 @@ def upload_file():
         return jsonify({"status": "error", "message": "No file part in the request."}), 400
 
     file = request.files['file']
-    table_name = request.form.get("table_name")
+    table_name = request.form.get("table_name", "data_table")
 
     if file.filename == '':
         return jsonify({"status": "error", "message": "No file selected."}), 400
-    if not table_name:
-        return jsonify({"status": "error", "message": "Table name not provided."}), 400
 
-    temp_file_path = None
     try:
-        file_ext = os.path.splitext(file.filename)[1]
-        with NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-            file.save(temp_file.name)
-            temp_file_path = temp_file.name
-
-        con, table_name_actual, db_file_path = get_db_info(temp_file_path, table_name)
+        # Create an in-memory DuckDB connection and load the data
+        con = get_db_connection(file)
         
-        columns = [{"name": row[1], "type": row[2]} for row in con.execute(f"PRAGMA table_info('{table_name_actual}')").fetchall()]
+        columns = [{"name": row[1], "type": row[2]} for row in con.execute(f"PRAGMA table_info('{table_name}')").fetchall()]
         
         # Get total row count
-        total_rows = con.execute(f"SELECT COUNT(*) FROM {table_name_actual}").fetchone()[0]
-        preview_data = con.execute(f"SELECT * FROM {table_name_actual} LIMIT 20").fetchall()
+        total_rows = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        preview_data = con.execute(f"SELECT * FROM {table_name} LIMIT 20").fetchall()
         
+        # A unique ID for this session
         session_id = os.urandom(16).hex()
         db_session[session_id] = {
             'con': con, 
-            'file_path': temp_file_path, 
-            'db_file_path': db_file_path,
-            'table_name': table_name_actual
+            'table_name': table_name
         }
 
         return jsonify({
@@ -109,17 +103,15 @@ def upload_file():
             "columns": columns,
             "total_rows": total_rows,
             "preview_data": preview_data,
-            "table_name": table_name_actual
+            "table_name": table_name
         })
     except Exception as e:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/ask", methods=["POST"])
 def ask_query():
     """Processes a natural language query and returns SQL, explanation, and results."""
-    question = request.form.get("question", "").lower()  # Convert to lowercase for case-insensitive matching
+    question = request.form.get("question", "").lower()
     session_id = request.form.get("session_id")
     execute_sql_str = request.form.get("execute_sql", "false")
     execute_sql = execute_sql_str.lower() == 'true'
@@ -134,11 +126,9 @@ def ask_query():
     # Check for schema-related queries and bypass the LLM
     schema_keywords = ["schema", "columns", "data types", "table info", "structure", "describe"]
     if any(word in question for word in schema_keywords):
-        # This is the query that will be shown to the user in the UI.
-        sql_display = f"DESCRIBE {table_name};"
-        # This is the query that will be executed by DuckDB.
-        sql_execution = f"SELECT * FROM PRAGMA_TABLE_INFO('{table_name}')"
-        explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names, data types, and other properties."
+        sql_display = f"PRAGMA table_info('{table_name}')"
+        sql_execution = sql_display
+        explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names and data types."
         try:
             cursor = con.execute(sql_execution)
             headers = [desc[0] for desc in cursor.description]
@@ -160,13 +150,12 @@ def ask_query():
     # Normal LLM-based query processing
     try:
         formatted_schema = format_schema_for_prompt(con, table_name)
-
         llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
-
+        
         prompt_template = ChatPromptTemplate.from_messages(
             [
                 ("system", 
-                    """
+                     """
 You are an expert SQL query generator. Your task is to analyze the following natural language question about the table '{table_name}' and provide a single, valid DuckDB SQL query. This query should be a SELECT statement. Also, provide a clear and concise explanation of what the query does.
 
 The table schema is as follows:
@@ -240,24 +229,12 @@ Example format:
 
 @app.route("/clear_session", methods=["POST"])
 def clear_session():
-    """Clears the session data and deletes the temporary files."""
+    """Clears the session data."""
     session_id = request.form.get("session_id")
     if session_id in db_session:
         session_data = db_session[session_id]
         con = session_data['con']
         con.close()
-        
-        file_path = session_data['file_path']
-        db_file_path = session_data['db_file_path']
-        
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(db_file_path):
-            os.remove(db_file_path)
-            
         del db_session[session_id]
         return jsonify({"status": "success", "message": "Session cleared."})
     return jsonify({"status": "error", "message": "Session not found."}), 404
-
-if __name__ == "__main__":
-    app.run(debug=True, port=8000)
