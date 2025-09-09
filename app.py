@@ -4,48 +4,27 @@ import duckdb
 import os
 import json
 import re
-from io import StringIO
-import pandas as pd
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+import pandas as pd
+from io import BytesIO
+from tempfile import NamedTemporaryFile
 
-# Retrieve the API key from the environment, assuming it's set in production.
-# If not found, fall back to loading from a .env file for local development.
+# Load environment variables from the .env file
+load_dotenv()
+
+# Retrieve the API key from the environment
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    try:
-        load_dotenv()
-        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        if not GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY not found. Please set it in your environment or a .env file.")
-    except Exception as e:
-        # Fallback for environments where dotenv might not be available
-        raise ValueError(f"GROQ_API_KEY not found and dotenv failed to load it: {e}")
+    raise ValueError("GROQ_API_KEY not found. Please set it in your .env file.")
 
 app = Flask(__name__)
 CORS(app)
 
-# A global dictionary to store the database connection for the session.
-# This will persist across different requests within the same process.
+# A global dictionary to store the DataFrame for the session.
+# This makes the application stateless with respect to the filesystem.
 db_session = {}
-
-def get_db_connection(uploaded_file):
-    """Creates and returns an in-memory DuckDB connection with the data."""
-    try:
-        # Read the uploaded file's content into a Pandas DataFrame
-        string_io = StringIO(uploaded_file.read().decode('utf-8'))
-        df = pd.read_csv(string_io)
-
-        # Create an in-memory DuckDB connection
-        con = duckdb.connect(':memory:')
-        
-        # Register the DataFrame as a table in the in-memory database
-        con.register('data_table', df)
-        
-        return con
-    except Exception as e:
-        raise Exception(f"Failed to create database from file: {str(e)}")
 
 def format_schema_for_prompt(con, table_name):
     """Retrieves and formats the table schema for the LLM prompt."""
@@ -69,36 +48,40 @@ def home():
 
 @app.route("/upload", methods=["POST"])
 def upload_file():
-    """Handles file upload, reads schema, and stores it in-memory."""
+    """Handles file upload, reads data into memory, and stores it in the session."""
     if 'file' not in request.files:
         return jsonify({"status": "error", "message": "No file part in the request."}), 400
 
     file = request.files['file']
-    table_name = request.form.get("table_name", "data_table")
+    table_name = request.form.get("table_name")
 
     if file.filename == '':
         return jsonify({"status": "error", "message": "No file selected."}), 400
+    if not table_name:
+        return jsonify({"status": "error", "message": "Table name not provided."}), 400
 
     try:
-        # Create an in-memory DuckDB connection and load the data
-        con = get_db_connection(file)
+        # Read the uploaded file directly into a BytesIO stream
+        file_stream = BytesIO(file.read())
         
-        columns = [{"name": row[1], "type": row[2]} for row in con.execute(f"PRAGMA table_info('{table_name}')").fetchall()]
+        # Read the stream into a Pandas DataFrame. This is the key change.
+        df = pd.read_csv(file_stream)
         
-        # Get total row count
-        total_rows = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        preview_data = con.execute(f"SELECT * FROM {table_name} LIMIT 20").fetchall()
-        
-        # A unique ID for this session
         session_id = os.urandom(16).hex()
+        # Store the DataFrame itself, not a file path
         db_session[session_id] = {
-            'con': con, 
+            'dataframe': df,
             'table_name': table_name
         }
 
+        # Get metadata directly from the DataFrame
+        columns = [{"name": col, "type": str(df.dtypes[col])} for col in df.columns]
+        total_rows = len(df)
+        preview_data = df.head(20).values.tolist()
+        
         return jsonify({
             "status": "success",
-            "message": "File uploaded and schema read successfully.",
+            "message": "File uploaded and data loaded into memory.",
             "session_id": session_id,
             "columns": columns,
             "total_rows": total_rows,
@@ -120,17 +103,22 @@ def ask_query():
         return jsonify({"status": "error", "message": "Session not found. Please upload a dataset first."}), 404
 
     session_data = db_session[session_id]
-    con = session_data['con']
+    df = session_data['dataframe']
     table_name = session_data['table_name']
     
     # Check for schema-related queries and bypass the LLM
     schema_keywords = ["schema", "columns", "data types", "table info", "structure", "describe"]
     if any(word in question for word in schema_keywords):
-        sql_display = f"PRAGMA table_info('{table_name}')"
-        sql_execution = sql_display
-        explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names and data types."
+        sql_display = f"DESCRIBE {table_name};"
+        explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names, data types, and other properties."
+        
         try:
-            cursor = con.execute(sql_execution)
+            # Connect to a new in-memory DB for this specific request
+            con = duckdb.connect(':memory:')
+            con.register(table_name, df)
+            
+            # Execute the query
+            cursor = con.execute(f"SELECT * FROM PRAGMA_TABLE_INFO('{table_name}')")
             headers = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
             results = [headers] + rows
@@ -138,7 +126,9 @@ def ask_query():
         except Exception as e:
             execution_error = str(e)
             results = None
-            
+        finally:
+            con.close()
+        
         return jsonify({
             "status": "success",
             "sql_query": sql_display,
@@ -149,13 +139,18 @@ def ask_query():
 
     # Normal LLM-based query processing
     try:
-        formatted_schema = format_schema_for_prompt(con, table_name)
-        llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
+        # Connect to a new in-memory DB for this specific request
+        con = duckdb.connect(':memory:')
+        con.register(table_name, df)
         
+        formatted_schema = format_schema_for_prompt(con, table_name)
+
+        llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
+
         prompt_template = ChatPromptTemplate.from_messages(
             [
                 ("system", 
-                     """
+                    """
 You are an expert SQL query generator. Your task is to analyze the following natural language question about the table '{table_name}' and provide a single, valid DuckDB SQL query. This query should be a SELECT statement. Also, provide a clear and concise explanation of what the query does.
 
 The table schema is as follows:
@@ -203,38 +198,37 @@ Example format:
         execution_error = None
         if execute_sql and sql_query and "Error" not in sql_query:
             try:
-                # Execute the query and get the result cursor
+                # Execute the query on the in-memory connection
                 cursor = con.execute(sql_query)
-                
-                # Get the column names from the cursor's description, which always exists
                 headers = [desc[0] for desc in cursor.description]
-                
-                # Fetch all rows
                 rows = cursor.fetchall()
-                
-                # Combine headers and rows for the final result
                 results = [headers] + rows
             except Exception as e:
                 execution_error = str(e)
-
-        return jsonify({
-            "status": "success",
-            "sql_query": sql_query,
-            "explanation": explanation,
-            "results": results,
-            "execution_error": execution_error
-        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        # Ensure the connection is closed after every request
+        if 'con' in locals():
+            con.close()
+
+    return jsonify({
+        "status": "success",
+        "sql_query": sql_query,
+        "explanation": explanation,
+        "results": results,
+        "execution_error": execution_error
+    })
 
 @app.route("/clear_session", methods=["POST"])
 def clear_session():
-    """Clears the session data."""
+    """Clears the session data from memory."""
     session_id = request.form.get("session_id")
     if session_id in db_session:
-        session_data = db_session[session_id]
-        con = session_data['con']
-        con.close()
+        # Simply delete the entry from the in-memory dictionary
         del db_session[session_id]
         return jsonify({"status": "success", "message": "Session cleared."})
     return jsonify({"status": "error", "message": "Session not found."}), 404
+
+if __name__ == "__main__":
+    app.run(debug=True, port=os.environ.get("PORT", 8000))
