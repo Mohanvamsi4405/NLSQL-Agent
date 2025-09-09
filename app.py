@@ -231,4 +231,5 @@ def clear_session():
     return jsonify({"status": "error", "message": "Session not found."}), 404
 
 if __name__ == "__main__":
-    app.run(debug=True, port=os.environ.get("PORT", 8000))
+    app.run(debug=True)
+
