@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+duckdb
+pandas
+langchain_groq
+python-dotenv
+gunicorn

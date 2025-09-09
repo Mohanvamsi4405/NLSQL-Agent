@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>NL-SQL Agent</title>
+    <!-- Prism.js CSS for syntax highlighting (using the One Dark theme) -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-one-dark.min.css" rel="stylesheet" />
+    <style>
+        :root {
+            --bg: #090e1a;
+            --panel: #0d162b;
+            --muted: #8a96b3;
+            --accent: #7c5cff;
+            --card: #12192e;
+            --glass: rgba(255, 255, 255, 0.05);
+            --success: #34d399;
+            --danger: #ef4444;
+            --border: rgba(255, 255, 255, 0.08);
+
+            /* New color variables for the gradient palette */
+            --gradient-start: #00bfff;
+            --gradient-middle: #a68dff;
+            --gradient-end: #ff80f2;
+
+            /* New text color variables for each section */
+            --upload-text: #c5d7ff;
+            --query-text: #b6c4ff;
+            --answer-text: #a8baff;
+
+            /* New color variables for subtle card borders to match image */
+            --purple-glow: rgba(151, 131, 255, 0.3);
+            --green-glow: rgba(87, 255, 138, 0.3);
+            --orange-glow: rgba(255, 151, 87, 0.3);
+            --glow-blue: rgba(0, 191, 255, 0.5);
+
+            font-family: 'Inter', sans-serif, system-ui;
+            color-scheme: dark;
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background: var(--bg);
+            color: #e6eef8;
+            box-sizing: border-box;
+            background: linear-gradient(180deg, #12192e 0%, #0d162b 100%);
+        }
+        *, *:before, *:after {
+            box-sizing: inherit;
+        }
+
+        .container {
+            width: 100%;
+            padding: 28px 20px;
+        }
+
+        /* --- New Header Styles --- */
+        .centered-header {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            margin-bottom: 24px;
+            padding: 24px;
+            border-radius: 12px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            position: relative;
+            box-shadow: 0 0 20px rgba(0, 191, 255, 0.2);
+            animation: headerGlow 3s infinite alternate ease-in-out;
+        }
+
+        @keyframes headerGlow {
+            0% {
+                box-shadow: 0 0 10px rgba(0, 191, 255, 0.2), 0 0 20px rgba(124, 92, 255, 0.2);
+            }
+            100% {
+                box-shadow: 0 0 20px rgba(0, 191, 255, 0.4), 0 0 40px rgba(124, 92, 255, 0.4);
+            }
+        }
+
+        .header-logo-container {
+            width: 250px;
+            height: 60px;
+            border-radius: 16px;
+            background: linear-gradient(180deg, var(--accent), #5a40ff);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 12px;
+            box-shadow: 0 0 15px rgba(124, 92, 255, 0.6);
+        }
+
+        .header-logo {
+            font-weight: 700;
+            font-size: 24px;
+            color: white;
+            user-select: none;
+        }
+
+        .header-title {
+            font-size: 26px;
+            font-weight: 700;
+            margin: 0 0 8px;
+            background: linear-gradient(90deg, var(--gradient-start), var(--gradient-middle), var(--gradient-end));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-subtitle {
+            font-size: 15px;
+            margin: 0;
+            color: var(--muted);
+            max-width: 600px;
+        }
+
+        .header-description {
+            font-size: 14px;
+            color: var(--muted);
+            max-width: 600px;
+            margin-top: 12px;
+            line-height: 1.5;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(300px, 0.4fr) 1fr;
+            gap: 24px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 12px 24px rgba(0, 0, 0, 0.7);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .card-header h2 {
+            font-size: 18px;
+            font-weight: 500;
+            margin: 0;
+            background: linear-gradient(90deg, var(--gradient-start), var(--gradient-middle), var(--gradient-end));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .upload-area {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            color: var(--upload-text);
+            box-shadow: 0 0 10px 2px var(--purple-glow);
+        }
+
+        .history-card {
+            box-shadow: 0 0 10px 2px var(--green-glow);
+        }
+
+        .query-card {
+            color: var(--query-text);
+            box-shadow: 0 0 10px 2px var(--orange-glow);
+        }
+
+        .answer-card {
+            color: var(--answer-text);
+            box-shadow: 0 0 10px 2px var(--purple-glow);
+        }
+
+        .file-input {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        input[type="file"] {
+            color: transparent;
+            flex-grow: 1;
+            min-width: 120px;
+        }
+
+        input[type="file"]::-webkit-file-upload-button {
+            visibility: hidden;
+            width: 0;
+        }
+
+        input[type="file"]::before {
+            content: 'Choose File';
+            display: inline-block;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 16px;
+            outline: none;
+            white-space: nowrap;
+            -webkit-user-select: none;
+            cursor: pointer;
+            text-shadow: 1px 1px #fff;
+            font-weight: 500;
+            color: white;
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        input[type="file"]:hover::before {
+            border-color: var(--accent);
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .badge {
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        /* Updated table container styles for responsiveness */
+        #preview-container,
+        #results-table-container {
+            background: var(--glass);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            max-height: 334px;
+            overflow-x: auto;
+            overflow-y: auto;
+            padding: 0; /* Remove padding to eliminate gap */
+            width: 100%;
+            max-width: 100%;
+            -webkit-overflow-scrolling: touch; /* Smooth scrolling on touch devices */
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            color: #e6eef8;
+            table-layout: auto; /* Allow columns to adjust based on content */
+        }
+
+        th,
+        td {
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+            white-space: nowrap;
+            word-break: break-word; /* Allow wrapping for long text */
+        }
+
+        th {
+            font-weight: 600;
+            color: #bcd4ff;
+            background: var(--card);
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            margin: 0; /* Ensure no margin on headers */
+            box-shadow: none; /* Remove shadow to prevent visual gap */
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 16px;
+        }
+
+        button {
+            background: var(--accent);
+            border: none;
+            color: white;
+            padding: 10px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+
+        #ask-btn {
+            background: linear-gradient(90deg, #ff80f2, #a68dff, #7c5cff);
+            font-weight: 600;
+        }
+
+        button:hover {
+            background: #6a4bff;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        button.ghost {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--muted);
+        }
+
+        button.ghost:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        button.small {
+            padding: 8px 12px;
+            font-size: 13px;
+            border-radius: 7px;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 120px;
+            border-radius: 8px;
+            background: transparent;
+            border: 1px solid var(--border);
+            padding: 14px;
+            color: var(--query-text);
+            font-size: 14px;
+            resize: vertical;
+        }
+
+        textarea::placeholder {
+            color: var(--muted);
+        }
+
+        .result-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .result-panel .muted {
+            color: var(--answer-text);
+        }
+
+        .result-section {
+            border: 1px solid var(--border);
+            background: var(--card);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        pre.sql {
+            background: #0b1220;
+            padding: 16px;
+            border-radius: 8px;
+            overflow: auto;
+            border: 1px solid var(--border);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .explain {
+            background: #0b1220;
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            color: var(--answer-text);
+        }
+
+        pre[class*="language-"] {
+            background-color: #0b1220 !important;
+            border: 1px solid var(--border) !important;
+            padding: 16px;
+            border-radius: 8px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        code[class*="language-"] {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", monospace !important;
+            line-height: 1.6;
+        }
+
+        .meta {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        .history {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+            color: #e6eef8;
+        }
+
+        .history .item {
+            padding: 10px 12px;
+            border-radius: 8px;
+            margin-bottom: 6px;
+            background: rgba(255, 255, 255, 0.02);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .history .item:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .flex {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .error {
+            color: var(--danger);
+        }
+
+        .success {
+            color: var(--success);
+        }
+
+        @media (max-width: 880px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+            #preview-container,
+            #results-table-container {
+                width: 325px;
+                height: 334px;
+                max-width: 100%; /* Prevent overflow on smaller screens */
+                overflow-x: auto;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+                padding: 0; /* Ensure no padding in mobile view */
+            }
+        }
+
+        #dataset-info {
+            background-color: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 16px;
+            display: none;
+            border: 1px solid var(--border);
+        }
+
+        #dataset-info .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        #dataset-info .info-row strong {
+            color: var(--upload-text);
+        }
+
+        #dataset-info .info-badges {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="centered-header">
+            <div class="header-logo-container">
+                <div class="header-logo">NLSQL Agent</div>
+            </div>
+            <h1 class="header-title">Natural Language → SQL</h1>
+            <p class="header-subtitle">A powerful, interactive tool for data analysis.</p>
+            <p class="header-description">Query your data using plain English. Simply upload a CSV file and ask questions to instantly generate SQL queries and view your results.</p>
+        </header>
+
+        <div class="layout">
+            <div>
+                <div class="card upload-area">
+                    <div class="card-header">
+                        <h2>1. Upload Dataset</h2>
+                        <div class="meta"><span id="session-badge" class="badge">No Session</span></div>
+                    </div>
+
+                    <div class="file-input">
+                        <input id="file-input" type="file" accept=".csv" />
+                        <span id="selected-file-name" class="muted" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;"></span>
+                        <button id="upload-btn">Upload CSV</button>
+                    </div>
+                    <div class="muted">Supported: CSV.</div>
+
+                    <div id="dataset-info" style="display:none;">
+                        <div class="info-row">
+                            <strong>File Name:</strong> <span id="file-name"></span>
+                        </div>
+                        <div class="info-row">
+                            <strong>Table Name:</strong> <span id="table-name-display"></span>
+                        </div>
+                        <div class="info-badges">
+                            <div class="badge" id="columns-count"></div>
+                            <div class="badge" id="rows-count"></div>
+                        </div>
+                    </div>
+
+                    <div id="preview-container" class="preview-container" style="display:none">
+                        <div class="muted" style="margin-bottom: 8px; text-align: center;">Max 20 rows shown for preview.</div>
+                    </div>
+                </div>
+
+                <div class="card history-card" style="margin-top:24px">
+                    <div class="card-header">
+                        <h2>Query History </h2>
+                        <div class="muted">Click to reuse</div>
+                    </div>
+                    <div id="history" class="history">No history yet.</div>
+                </div>
+            </div>
+
+            <div>
+                <div class="card query-card">
+                    <div class="card-header">
+                        <h2>2. Ask a Question</h2>
+                        <div class="meta">LLM: <span style="color:#e6eef8;font-weight:500">llama-3.1-8b-instant</span></div>
+                    </div>
+
+                    <textarea id="question" placeholder="e.g., show total sales by region for 2023, ordered by total desc"></textarea>
+
+                    <div class="controls">
+                        <label class="toggle muted"><input id="execute-toggle" type="checkbox" checked /> Execute SQL</label>
+                        <div style="flex:1"></div>
+                        <button id="ask-btn">Ask</button>
+                        <button id="clear-btn" class="ghost small">Clear</button>
+                    </div>
+                    <div id="status" style="margin-top:12px" class="muted"></div>
+                </div>
+
+                <div class="card answer-card" style="margin-top:24px">
+                    <div class="card-header">
+                        <h2>3. Answer</h2>
+                        <div class="flex">
+                            <button id="copy-sql" class="small ghost">Copy SQL</button>
+                            <button id="copy-explain" class="small ghost">Copy Explanation</button>
+                        </div>
+                    </div>
+
+                    <div class="result-panel">
+                        <div class="result-section">
+                            <div class="muted" style="margin-bottom:8px;">Generated SQL</div>
+                            <pre id="sql-block" class="sql language-sql" aria-live="polite">The generated SQL will appear here after your query.</pre>
+                        </div>
+
+                        <div class="result-section">
+                            <div class="muted" style="margin-bottom:8px;">Explanation</div>
+                            <div id="explain-block" class="explain" aria-live="polite">A clear explanation of the SQL query will be provided here.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card" style="margin-top:24px">
+            <div id="results-table-container">
+                <span style="color:var(--muted)">Query results will be displayed here.</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Prism.js core and SQL component -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+
+        const fileInput = document.getElementById('file-input');
+        const selectedFileNameSpan = document.getElementById('selected-file-name');
+        const uploadBtn = document.getElementById('upload-btn');
+        const fileNameSpan = document.getElementById('file-name');
+        const tableNameDisplaySpan = document.getElementById('table-name-display');
+        const datasetInfoDiv = document.getElementById('dataset-info');
+        const columnsCountSpan = document.getElementById('columns-count');
+        const rowsCountSpan = document.getElementById('rows-count');
+        const previewContainer = document.getElementById('preview-container');
+        const questionTextarea = document.getElementById('question');
+        const executeToggle = document.getElementById('execute-toggle');
+        const askBtn = document.getElementById('ask-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const statusDiv = document.getElementById('status');
+        const sqlBlock = document.getElementById('sql-block');
+        const explainBlock = document.getElementById('explain-block');
+        const resultsTableContainer = document.getElementById('results-table-container');
+        const copySqlBtn = document.getElementById('copy-sql');
+        const copyExplainBtn = document.getElementById('copy-explain');
+        const historyDiv = document.getElementById('history');
+        const sessionBadge = document.getElementById('session-badge');
+
+        let sessionId = null;
+        let queryHistory = [];
+        let uploadedTableName = null;
+
+        const setStatus = (message, type = 'info') => {
+            statusDiv.textContent = message;
+            statusDiv.className = `muted ${type}`;
+        };
+
+        const renderTable = (container, headers, rows) => {
+            let tableHtml = `
+                <table>
+                    <thead>
+                        <tr>${headers.map(col => `<th>${col}</th>`).join('')}</tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            if (rows && rows.length > 0) {
+                tableHtml += `
+                    ${rows.map(row => `<tr>${row.map(cell => `<td>${cell !== null ? cell : 'NULL'}</td>`).join('')}</tr>`).join('')}
+                `;
+            }
+
+            tableHtml += `
+                    </tbody>
+                </table>
+            `;
+
+            container.innerHTML = tableHtml;
+
+            if (!rows || rows.length === 0) {
+                const noResultsMsg = document.createElement('div');
+                noResultsMsg.className = 'muted';
+                noResultsMsg.style.textAlign = 'center';
+                noResultsMsg.style.marginTop = '12px';
+                noResultsMsg.textContent = 'No data rows to display, but here is the table schema.';
+                container.appendChild(noResultsMsg);
+            }
+        };
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                selectedFileNameSpan.textContent = fileInput.files[0].name;
+            } else {
+                selectedFileNameSpan.textContent = '';
+            }
+        });
+
+        uploadBtn.addEventListener('click', async () => {
+            if (!fileInput.files.length) {
+                setStatus('Please select a file to upload.', 'error');
+                return;
+            }
+            const file = fileInput.files[0];
+
+            const defaultTableName = file.name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+            uploadedTableName = prompt("Please enter a name for the table:", defaultTableName);
+
+            if (!uploadedTableName || uploadedTableName.trim() === "") {
+                setStatus('Table name is required. Upload cancelled.', 'error');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('table_name', uploadedTableName);
+
+            setStatus('Uploading and analyzing dataset...', 'info');
+            askBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${API_URL}/upload`, {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    sessionId = data.session_id;
+                    sessionBadge.textContent = 'Session Active';
+                    sessionBadge.className = 'badge success';
+
+                    fileNameSpan.textContent = file.name;
+                    tableNameDisplaySpan.textContent = uploadedTableName;
+                    datasetInfoDiv.style.display = 'block';
+
+                    columnsCountSpan.textContent = `Total Columns: ${data.columns.length}`;
+                    rowsCountSpan.textContent = `Total Rows: ${data.total_rows}`;
+
+                    const headers = data.columns.map(col => col.name);
+                    const rows = data.preview_data.slice(1);
+                    renderTable(previewContainer, headers, rows);
+                    previewContainer.style.display = 'block';
+                    resultsTableContainer.innerHTML = `<span style="color:var(--muted)">Query results will be displayed here.</span>`;
+
+                    setStatus('Dataset uploaded and ready.', 'success');
+                    askBtn.disabled = false;
+                } else {
+                    setStatus(`Upload failed: ${data.message || response.statusText}`, 'error');
+                    datasetInfoDiv.style.display = 'none';
+                    previewContainer.style.display = 'none';
+                    askBtn.disabled = true;
+                }
+            } catch (error) {
+                setStatus(`Upload failed: ${error.message}`, 'error');
+            } finally {
+                askBtn.disabled = false;
+            }
+        });
+
+        askBtn.addEventListener('click', async () => {
+            if (!sessionId) {
+                setStatus('Please upload a dataset first.', 'error');
+                return;
+            }
+
+            const question = questionTextarea.value.trim();
+            if (!question) {
+                setStatus('Please enter a question.', 'error');
+                return;
+            }
+
+            setStatus('Generating SQL and explanation...', 'info');
+            askBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('question', question);
+            formData.append('session_id', sessionId);
+            formData.append('table_name', uploadedTableName);
+            formData.append('execute_sql', executeToggle.checked);
+
+            try {
+                const response = await fetch(`${API_URL}/ask`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    sqlBlock.textContent = data.sql_query;
+                    explainBlock.textContent = data.explanation;
+
+                    Prism.highlightElement(sqlBlock);
+
+                    queryHistory.unshift({
+                        question,
+                        sql: data.sql_query,
+                        explain: data.explanation
+                    });
+                    updateHistory();
+
+                    if (executeToggle.checked && data.results) {
+                        const headers = data.results[0];
+                        const rows = data.results.slice(1);
+                        renderTable(resultsTableContainer, headers, rows);
+                        setStatus('Query generated and executed successfully.', 'success');
+                    } else {
+                        resultsTableContainer.innerHTML = `<span style="color:var(--muted)">SQL execution is disabled. Enable it above to see results.</span>`;
+                        setStatus('Query generated successfully. Execution disabled.', 'info');
+                    }
+                } else {
+                    sqlBlock.textContent = 'N/A';
+                    explainBlock.textContent = data.message || 'An unknown error occurred.';
+                    resultsTableContainer.innerHTML = `<span style="color:var(--danger)">${data.message || 'An unknown error occurred.'}</span>`;
+                    setStatus(`Query failed: ${data.message || 'An unknown error occurred.'}`, 'error');
+                }
+            } catch (error) {
+                setStatus(`An error occurred: ${error.message}`, 'error');
+            } finally {
+                askBtn.disabled = false;
+            }
+        });
+
+        clearBtn.addEventListener('click', async () => {
+            if (sessionId) {
+                const formData = new FormData();
+                formData.append('session_id', sessionId);
+                await fetch(`${API_URL}/clear_session`, {
+                    method: 'POST',
+                    body: formData
+                });
+            }
+
+            sessionId = null;
+            uploadedTableName = null;
+            queryHistory = [];
+            sessionBadge.textContent = 'No Session';
+            sessionBadge.className = 'badge';
+            datasetInfoDiv.style.display = 'none';
+            previewContainer.style.display = 'none';
+            questionTextarea.value = '';
+            sqlBlock.textContent = 'The generated SQL will appear here after your query.';
+            explainBlock.textContent = 'A clear explanation of the SQL query will be provided here.';
+            resultsTableContainer.innerHTML = `<span style="color:var(--muted)">Query results will be displayed here.</span>`;
+            historyDiv.innerHTML = 'No history yet.';
+            setStatus('');
+            askBtn.disabled = false;
+            selectedFileNameSpan.textContent = '';
+        });
+
+        const updateHistory = () => {
+            if (queryHistory.length > 0) {
+                historyDiv.innerHTML = queryHistory.map((item, index) => `
+                    <div class="item" data-index="${index}">
+                        ${item.question}
+                    </div>
+                `).join('');
+            } else {
+                historyDiv.innerHTML = 'No history yet.';
+            }
+        };
+
+        historyDiv.addEventListener('click', (event) => {
+            const item = event.target.closest('.item');
+            if (item) {
+                const index = item.dataset.index;
+                const historyItem = queryHistory[index];
+                questionTextarea.value = historyItem.question;
+                sqlBlock.textContent = historyItem.sql;
+                explainBlock.textContent = historyItem.explain;
+                Prism.highlightElement(sqlBlock);
+                resultsTableContainer.innerHTML = `<span style="color:var(--muted)">Press "Ask" to re-run this query.</span>`;
+            }
+        });
+
+        copySqlBtn.addEventListener('click', () => {
+            const textToCopy = sqlBlock.textContent;
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                setStatus('SQL copied!', 'success');
+            }).catch(err => {
+                setStatus('Failed to copy SQL.', 'error');
+            });
+        });
+
+        copyExplainBtn.addEventListener('click', () => {
+            const textToCopy = explainBlock.textContent;
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                setStatus('Explanation copied!', 'success');
+            }).catch(err => {
+                setStatus('Failed to copy explanation.', 'error');
+            });
+        });
+    </script>
+</body>
+</html>
