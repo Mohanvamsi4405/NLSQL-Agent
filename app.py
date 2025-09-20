@@ -3,41 +3,61 @@ from flask_cors import CORS
 import duckdb
 import os
 import json
+from tempfile import NamedTemporaryFile
 import re
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-import pandas as pd
-from io import BytesIO
-import logging
+import atexit
 
-# Set up logging for better debugging on Render
-logging.basicConfig(level=logging.INFO)
-logging.getLogger('werkzeug').setLevel(logging.INFO)
-
-# Load environment variables from the .env file
+# Load environment variables from the .env file.
+# This will work in local development, but on Render, you should set
+# the GROQ_API_KEY directly in the environment variables for your service.
 load_dotenv()
 
 # Retrieve the API key from the environment
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# Check if the API key is available
 if not GROQ_API_KEY:
-    logging.error("GROQ_API_KEY not found. Please set it in your .env file or Render environment variables.")
+    # On a production server, this should be set as an environment variable,
+    # so this check will primarily be for local development.
+    print("WARNING: GROQ_API_KEY not found. Please set it in your .env file or as an environment variable.")
 
 app = Flask(__name__)
-# Enable CORS for all origins, which is useful for development and some production scenarios
 CORS(app)
 
-# A global dictionary to store the DataFrame for the session.
-# WARNING: This approach is not persistent. Data will be lost on service restart.
-# It is suitable for a single-user, session-based application.
+# A global dictionary to store the database connection for the session.
+# NOTE: In a multi-worker production environment (like Gunicorn on Render),
+# this is not a robust solution as requests may be routed to different workers.
+# For a truly production-ready app, you would need a persistent session store
+# like a database (e.g., Redis) or a shared file system. For now, this will
+# work in a single-worker configuration, but be aware of the limitation.
 db_session = {}
+
+def get_db_info(file_path, table_name):
+    """Creates and returns a DuckDB connection and the table name."""
+    try:
+        # Determine the correct reading function based on file extension
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        # Use a temporary, file-based DuckDB database
+        db_file_path = file_path.replace(file_ext, '.duckdb')
+        con = duckdb.connect(database=db_file_path, read_only=False)
+        
+        if file_ext == '.csv':
+            read_function = f"read_csv_auto('{file_path}')"
+        else:
+            raise Exception(f"Unsupported file format: {file_ext}")
+            
+        con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM {read_function}")
+        return con, table_name, db_file_path
+    except Exception as e:
+        raise Exception(f"Failed to create database from file: {str(e)}")
 
 def format_schema_for_prompt(con, table_name):
     """Retrieves and formats the table schema for the LLM prompt."""
     try:
-        schema = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+        schema_query = f"PRAGMA table_info('{table_name}')"
+        schema = con.execute(schema_query).fetchall()
         
         formatted_schema = f"Table '{table_name}' has the following columns:\n"
         for row in schema:
@@ -46,7 +66,6 @@ def format_schema_for_prompt(con, table_name):
             formatted_schema += f"- {col_name} ({col_type})\n"
         return formatted_schema
     except Exception as e:
-        logging.error(f"Could not retrieve schema: {e}")
         return f"Could not retrieve schema: {str(e)}"
 
 @app.route("/")
@@ -56,110 +75,110 @@ def home():
 
 @app.route("/upload", methods=["POST"])
 def upload_file():
-    """Handles file upload, reads data into memory, and stores it in the session."""
-    logging.info("Received file upload request.")
+    """Handles file upload, reads schema, and stores it in-memory."""
     if 'file' not in request.files:
-        logging.error("No file part in the request.")
         return jsonify({"status": "error", "message": "No file part in the request."}), 400
 
     file = request.files['file']
     table_name = request.form.get("table_name")
 
     if file.filename == '':
-        logging.error("No file selected.")
         return jsonify({"status": "error", "message": "No file selected."}), 400
     if not table_name:
-        logging.error("Table name not provided.")
         return jsonify({"status": "error", "message": "Table name not provided."}), 400
 
+    temp_file_path = None
     try:
-        file_stream = BytesIO(file.read())
-        df = pd.read_csv(file_stream)
+        file_ext = os.path.splitext(file.filename)[1]
+        with NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+            file.save(temp_file.name)
+            temp_file_path = temp_file.name
+
+        con, table_name_actual, db_file_path = get_db_info(temp_file_path, table_name)
+        
+        columns = [{"name": row[1], "type": row[2]} for row in con.execute(f"PRAGMA table_info('{table_name_actual}')").fetchall()]
+        
+        # Get total row count
+        total_rows = con.execute(f"SELECT COUNT(*) FROM {table_name_actual}").fetchone()[0]
+        preview_data = con.execute(f"SELECT * FROM {table_name_actual} LIMIT 20").fetchall()
         
         session_id = os.urandom(16).hex()
         db_session[session_id] = {
-            'dataframe': df,
-            'table_name': table_name
+            'con': con, 
+            'file_path': temp_file_path, 
+            'db_file_path': db_file_path,
+            'table_name': table_name_actual
         }
-        logging.info(f"File uploaded and data loaded. Session ID: {session_id}")
 
-        columns = [{"name": col, "type": str(df.dtypes[col])} for col in df.columns]
-        total_rows = len(df)
-        preview_data = df.head(5).values.tolist()
-        
         return jsonify({
             "status": "success",
-            "message": "File uploaded and data loaded into memory.",
+            "message": "File uploaded and schema read successfully.",
             "session_id": session_id,
             "columns": columns,
             "total_rows": total_rows,
             "preview_data": preview_data,
-            "table_name": table_name
+            "table_name": table_name_actual
         })
     except Exception as e:
-        logging.error(f"File upload failed: {e}")
-        return jsonify({"status": "error", "message": f"Upload failed: {e}"}), 500
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/ask", methods=["POST"])
 def ask_query():
     """Processes a natural language query and returns SQL, explanation, and results."""
-    logging.info("Received natural language query request.")
     question = request.form.get("question", "").lower()
     session_id = request.form.get("session_id")
     execute_sql_str = request.form.get("execute_sql", "false")
     execute_sql = execute_sql_str.lower() == 'true'
 
     if not session_id or session_id not in db_session:
-        logging.error("Session not found.")
         return jsonify({"status": "error", "message": "Session not found. Please upload a dataset first."}), 404
 
     session_data = db_session[session_id]
-    df = session_data['dataframe']
+    con = session_data['con']
     table_name = session_data['table_name']
     
-    # Handle schema queries without hitting the LLM
-    if any(word in question for word in ["schema", "columns", "data types", "table info", "structure", "describe"]):
-        sql_display = f"SELECT * FROM PRAGMA_TABLE_INFO('{table_name}');"
-        explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names and their data types."
+    # Check for schema-related queries and bypass the LLM
+    schema_keywords = ["schema", "columns", "data types", "table info", "structure", "describe"]
+    if any(word in question for word in schema_keywords):
+        sql_display = f"DESCRIBE {table_name};"
+        sql_execution = f"SELECT * FROM PRAGMA_TABLE_INFO('{table_name}')"
+        explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names, data types, and other properties."
         try:
-            con = duckdb.connect(':memory:')
-            con.register(table_name, df)
-            cursor = con.execute(sql_display)
+            cursor = con.execute(sql_execution)
             headers = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
             results = [headers] + rows
             execution_error = None
         except Exception as e:
-            logging.error(f"Schema query execution failed: {e}")
             execution_error = str(e)
             results = None
-        finally:
-            con.close()
-        
+            
         return jsonify({
-            "status": "success", "sql_query": sql_display, "explanation": explanation,
-            "results": results, "execution_error": execution_error
+            "status": "success",
+            "sql_query": sql_display,
+            "explanation": explanation,
+            "results": results,
+            "execution_error": execution_error
         })
 
-    # LLM-based query processing
+    # Normal LLM-based query processing
     try:
-        con = duckdb.connect(':memory:')
-        con.register(table_name, df)
         formatted_schema = format_schema_for_prompt(con, table_name)
-        if not GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY is not set.")
 
         llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
-        
+
         prompt_template = ChatPromptTemplate.from_messages(
             [
                 ("system", 
-                    """You are an expert SQL query generator. Your task is to analyze the following natural language question about the table '{table_name}' and provide a single, valid DuckDB SQL query. This query should be a SELECT statement. Also, provide a clear and concise explanation of what the query does.
+                    """
+You are an expert SQL query generator. Your task is to analyze the following natural language question about the table '{table_name}' and provide a single, valid DuckDB SQL query. This query should be a SELECT statement. Also, provide a clear and concise explanation of what the query does.
 
 The table schema is as follows:
 {schema}
 
-Do not return the table schema or PRAGMA queries in the response. Only generate SELECT statements.
+Do not return the table schema or PRAGMA queries in the response, even if the user asks for it. The schema has already been provided to you. Only generate SELECT statements.
 
 When referencing a column name that contains a space or other special characters, always enclose the column name in double quotes (").
 
@@ -170,7 +189,8 @@ Example format:
     "sql_query": "SELECT ...",
     "explanation": "This query does..."
 }}
-```"""),
+```
+                    """),
                 ("human", "Natural language question: {question}")
             ]
         )
@@ -200,32 +220,65 @@ Example format:
         execution_error = None
         if execute_sql and sql_query and "Error" not in sql_query:
             try:
+                # Execute the query and get the result cursor
                 cursor = con.execute(sql_query)
+                
+                # Get the column names from the cursor's description, which always exists
                 headers = [desc[0] for desc in cursor.description]
+                
+                # Fetch all rows
                 rows = cursor.fetchall()
+                
+                # Combine headers and rows for the final result
                 results = [headers] + rows
             except Exception as e:
-                logging.error(f"SQL query execution failed: {e}")
                 execution_error = str(e)
-    except Exception as e:
-        logging.error(f"An error occurred during query processing: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if 'con' in locals():
-            con.close()
 
-    return jsonify({
-        "status": "success", "sql_query": sql_query, "explanation": explanation,
-        "results": results, "execution_error": execution_error
-    })
+        return jsonify({
+            "status": "success",
+            "sql_query": sql_query,
+            "explanation": explanation,
+            "results": results,
+            "execution_error": execution_error
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/clear_session", methods=["POST"])
 def clear_session():
-    """Clears the session data from memory."""
+    """Clears the session data and deletes the temporary files."""
     session_id = request.form.get("session_id")
     if session_id in db_session:
+        session_data = db_session[session_id]
+        con = session_data['con']
+        con.close()
+        
+        file_path = session_data['file_path']
+        db_file_path = session_data['db_file_path']
+        
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(db_file_path):
+            os.remove(db_file_path)
+            
         del db_session[session_id]
-        logging.info(f"Session {session_id} cleared.")
         return jsonify({"status": "success", "message": "Session cleared."})
-    logging.warning("Session not found during clear request.")
     return jsonify({"status": "error", "message": "Session not found."}), 404
+
+# A function to clean up files when the application exits.
+def cleanup_files():
+    for session_id, data in db_session.items():
+        if 'con' in data:
+            data['con'].close()
+        if 'file_path' in data and os.path.exists(data['file_path']):
+            os.remove(data['file_path'])
+        if 'db_file_path' in data and os.path.exists(data['db_file_path']):
+            os.remove(data['db_file_path'])
+    print("Cleaned up temporary DuckDB files.")
+
+atexit.register(cleanup_files)
+
+# This block is for local development only and will not be used in production.
+if __name__ == "__main__":
+    port = int(os.environ.get('PORT', 8000))
+    app.run(debug=True, host='0.0.0.0', port=port)
