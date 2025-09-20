@@ -8,29 +8,20 @@ import re
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-import atexit
 
-# Load environment variables from the .env file.
-# This will work in local development, but on Render, you should set
-# the GROQ_API_KEY directly in the environment variables for your service.
+# Load environment variables from the .env file
 load_dotenv()
 
 # Retrieve the API key from the environment
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    # On a production server, this should be set as an environment variable,
-    # so this check will primarily be for local development.
-    print("WARNING: GROQ_API_KEY not found. Please set it in your .env file or as an environment variable.")
+    raise ValueError("GROQ_API_KEY not found. Please set it in your .env file.")
 
 app = Flask(__name__)
 CORS(app)
 
 # A global dictionary to store the database connection for the session.
-# NOTE: In a multi-worker production environment (like Gunicorn on Render),
-# this is not a robust solution as requests may be routed to different workers.
-# For a truly production-ready app, you would need a persistent session store
-# like a database (e.g., Redis) or a shared file system. For now, this will
-# work in a single-worker configuration, but be aware of the limitation.
+# This will persist across different requests.
 db_session = {}
 
 def get_db_info(file_path, table_name):
@@ -45,6 +36,7 @@ def get_db_info(file_path, table_name):
         
         if file_ext == '.csv':
             read_function = f"read_csv_auto('{file_path}')"
+        
         else:
             raise Exception(f"Unsupported file format: {file_ext}")
             
@@ -127,7 +119,7 @@ def upload_file():
 @app.route("/ask", methods=["POST"])
 def ask_query():
     """Processes a natural language query and returns SQL, explanation, and results."""
-    question = request.form.get("question", "").lower()
+    question = request.form.get("question", "").lower()  # Convert to lowercase for case-insensitive matching
     session_id = request.form.get("session_id")
     execute_sql_str = request.form.get("execute_sql", "false")
     execute_sql = execute_sql_str.lower() == 'true'
@@ -142,7 +134,9 @@ def ask_query():
     # Check for schema-related queries and bypass the LLM
     schema_keywords = ["schema", "columns", "data types", "table info", "structure", "describe"]
     if any(word in question for word in schema_keywords):
+        # This is the query that will be shown to the user in the UI.
         sql_display = f"DESCRIBE {table_name};"
+        # This is the query that will be executed by DuckDB.
         sql_execution = f"SELECT * FROM PRAGMA_TABLE_INFO('{table_name}')"
         explanation = f"This query retrieves the schema for the '{table_name}' table, showing column names, data types, and other properties."
         try:
@@ -265,20 +259,8 @@ def clear_session():
         return jsonify({"status": "success", "message": "Session cleared."})
     return jsonify({"status": "error", "message": "Session not found."}), 404
 
-# A function to clean up files when the application exits.
-def cleanup_files():
-    for session_id, data in db_session.items():
-        if 'con' in data:
-            data['con'].close()
-        if 'file_path' in data and os.path.exists(data['file_path']):
-            os.remove(data['file_path'])
-        if 'db_file_path' in data and os.path.exists(data['db_file_path']):
-            os.remove(data['db_file_path'])
-    print("Cleaned up temporary DuckDB files.")
-
-atexit.register(cleanup_files)
-
-# This block is for local development only and will not be used in production.
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 8000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", 8000))
+    app.run(debug=True, host="0.0.0.0", port=port)  # remove parentheses after app
+
+
